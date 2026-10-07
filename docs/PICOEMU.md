@@ -111,6 +111,22 @@ SIO `0xD0000000`, CLINT `0xD0000100` (RV32: MTIME `+0x00`,
 MTIMECMP0 `+0x08`), TIMER0 `0x400B0000`, SRAM `0x20000000` (520 KB
 RP2350), flash `0x10000000`.
 
+### Observer taps (simulator hooks)
+
+| Export | Signature | Notes |
+|---|---|---|
+| `picoemu_sdd_add` | `int (argstr)` | Attach `thermometer:`, `eeprom:`, `jsmirror:i2c=0,addr=0x3c`, `spimirror:spi=0`. Resets registry per call. |
+| `picoemu_jsmirror_pending/drops` | `int ()` | Queued I2C ring entries / drop counter. |
+| `picoemu_jsmirror_pop` | `int (*out, max)` | Drain ring: `0x100\|addr` START, bytes, `0x200` STOP. |
+| `picoemu_spimirror_pending/drops/pop` | `int…` | Same for SPI: `0x100\|spi` CS assert, `0x200\|spi` deassert, MOSI bytes. |
+| `picoemu_spimirror_inject` | `int (data, len)` | Queue MISO reply bytes (0xFF when empty). |
+| `picoemu_adc_set/get` | `void/int (ch, raw12)` | Per-channel 12-bit inject/readback (`raw = mv*4095/3300`). |
+| `picoemu_pwm_read` | `int (slice, *hz, *dutyA, *dutyB, *en)` | Freq + duty/10000 + enable; any out-param nullable. |
+| `picoemu_pio_tx_push` | `int (block, sm, word)` | Feed a PIO program (I2S-out samples, pixels); `-1` on full. |
+| `picoemu_pio_rx_pop` | `int (block, sm, *word)` | Observe PIO output (I2S-in samples); `-1` on empty. |
+| `picoemu_pio_state` | `int (block, sm, *pc, *tx, *rx, *stalled)` | SM readback. |
+| `picoemu_cycle_count` | `double ()` | Sim-time stamp (cycle counter) for edge stamps/pace. |
+
 ### Storage / SD / flash
 
 | Export | Notes |
@@ -170,7 +186,7 @@ Devtools panel drives them.
 ## 6. Building from source
 
 Native: `cmake -S . -B build && cmake --build build -j && ctest
---test-dir build` (474 tests). WASM: `./build_wasm.sh` (needs emsdk;
+--test-dir build` (507 tests). WASM: `./build_wasm.sh` (needs emsdk;
 output to `web/picoemu.wasm.*`). Publish flow: manual
 `.github/workflows/publish.yml` (branch + version + description →
 npmjs `pico-emu` + GPR `@danish9661/pico-emu`).

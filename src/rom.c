@@ -26,10 +26,10 @@ uint8_t rom_image[ROM_SIZE];
  *   0x0380: ctz32 (Thumb code)
  *   0x03A0: reverse32 stub (returns 0)
  *   0x03B0: Flash function stubs
- *   0x0400: soft_float_table (array of 16-bit function pointers)
- *   0x0440: soft_double_table (array of 16-bit function pointers)
- *   0x0500: Float function stubs (BX LR, intercepted by cpu_step)
- *   0x0540: Double function stubs (BX LR, intercepted by cpu_step)
+ *   0x0400: soft_float_table (array of 32-bit function pointers, V1 order)
+ *   0x0460: soft_double_table (array of 32-bit function pointers, V1 order)
+ *   0x0500: Float function stubs (BX LR every 4 bytes, intercepted by cpu_step)
+ *   0x0560: Double function stubs (BX LR every 4 bytes, intercepted by cpu_step)
  */
 
 /* Helper: write a 16-bit value at a ROM offset (little-endian) */
@@ -165,34 +165,43 @@ static void rom_place_flash_stubs(void) {
 /* ========================================================================
  * Soft-Float / Soft-Double Function Tables and Stubs
  *
- * The SDK looks up these tables via rom_data_lookup('SF'/'SD').
- * Each table is an array of 16-bit function pointers in ROM.
+ * The SDK looks up these tables via rom_data_lookup('SF'/'SD'), then
+ * copies them WORD-WISE into sf/sd_table (V1: 0x54 bytes = 21 words).
+ * Each table entry is therefore a 32-bit routine address (Thumb bit
+ * set); stubs sit 4 bytes apart so index = (pc-BASE)/4. The old
+ * 16-bit layout made the SDK concatenate entry pairs into garbage
+ * pointers (e.g. 0x050B0508) — every fmul/fdiv jumped into ROM zeros
+ * and Arduino analogWrite() never returned.
  * The actual function stubs are BX LR, but rom_intercept()
  * catches execution at these addresses and performs the operation
  * natively in C using host float/double.
  * ======================================================================== */
 
 static void rom_place_float_double_tables(void) {
-    /* soft_float_table at 0x0400: array of 16-bit pointers */
+    /* soft_float_table at 0x0400: array of 32-bit pointers (V1 order) */
     for (int i = 0; i < ROM_FLOAT_FUNC_COUNT; i++) {
-        uint16_t addr = ROM_FLOAT_FUNC_BASE + (i * 2);
-        rom_write16(0x0400 + i * 2, addr | 1);  /* Thumb bit */
+        uint32_t addr = ROM_FLOAT_FUNC_BASE + (i * 4);
+        uint32_t val = addr | 1u;  /* Thumb bit */
+        rom_write16(0x0400 + i * 4, (uint16_t)(val & 0xFFFFu));
+        rom_write16(0x0400 + i * 4 + 2, (uint16_t)(val >> 16));
     }
 
-    /* soft_double_table at 0x0440: array of 16-bit pointers */
+    /* soft_double_table at 0x0460: array of 32-bit pointers (V1 order) */
     for (int i = 0; i < ROM_DOUBLE_FUNC_COUNT; i++) {
-        uint16_t addr = ROM_DOUBLE_FUNC_BASE + (i * 2);
-        rom_write16(0x0440 + i * 2, addr | 1);  /* Thumb bit */
+        uint32_t addr = ROM_DOUBLE_FUNC_BASE + (i * 4);
+        uint32_t val = addr | 1u;  /* Thumb bit */
+        rom_write16(0x0460 + i * 4, (uint16_t)(val & 0xFFFFu));
+        rom_write16(0x0460 + i * 4 + 2, (uint16_t)(val >> 16));
     }
 
-    /* Place BX LR at each float stub address */
+    /* Place BX LR at each float stub address (4-byte stride) */
     for (int i = 0; i < ROM_FLOAT_FUNC_COUNT; i++) {
-        rom_write16(ROM_FLOAT_FUNC_BASE + i * 2, 0x4770);
+        rom_write16(ROM_FLOAT_FUNC_BASE + i * 4, 0x4770);
     }
 
-    /* Place BX LR at each double stub address */
+    /* Place BX LR at each double stub address (4-byte stride) */
     for (int i = 0; i < ROM_DOUBLE_FUNC_COUNT; i++) {
-        rom_write16(ROM_DOUBLE_FUNC_BASE + i * 2, 0x4770);
+        rom_write16(ROM_DOUBLE_FUNC_BASE + i * 4, 0x4770);
     }
 }
 
@@ -225,8 +234,8 @@ static void rom_build_data_table(void) {
 
     /* soft_float_table ('SF') -> 0x0400 */
     rom_write16(off, ROM_DATA_SOFT_FLOAT);  rom_write16(off + 2, 0x0400); off += 4;
-    /* soft_double_table ('SD') -> 0x0440 */
-    rom_write16(off, ROM_DATA_SOFT_DOUBLE); rom_write16(off + 2, 0x0440); off += 4;
+    /* soft_double_table ('SD') -> 0x0460 */
+    rom_write16(off, ROM_DATA_SOFT_DOUBLE); rom_write16(off + 2, 0x0460); off += 4;
     /* End marker */
     rom_write16(off, 0x0000);               rom_write16(off + 2, 0x0000);
 }
@@ -235,10 +244,31 @@ static void rom_build_data_table(void) {
 void rom_init(void) {
     memset(rom_image, 0, ROM_SIZE);
 
-    /* Magic at offset 0x10: 'M', 'u', version=1 */
+    /* Magic at offset 0x10: 'M', 'u', version at 0x13 (B0=1).
+     * NOTE: rp2040_rom_version() reads 0x13, NOT 0x12. Reporting 0
+     * left every ROM-routed float slot NULL (sf/sd_table never
+     * populated), so the first fmul/fdiv jumped to address 0 and
+     * executed ROM zeros as a NOP-slide — Arduino analogWrite()
+     * (float clkdiv loop) never returned and no serial ever flushed.
+     * Report B0 so guests take the V1 table branch (+missing-fill). */
     rom_image[0x10] = 'M';
     rom_image[0x11] = 'u';
     rom_image[0x12] = 0x01;
+    rom_image[0x13] = 0x01;
+
+    /* V1 content sentinels: real-silicon halfwords the SDK's float/
+     * double init asserts before trusting the table (active unless
+     * NDEBUG). Without these, version-1 guests panic("") at boot. */
+    rom_write16(0x29ee, 0x0fc4);
+    rom_write16(0x29c0, 0x0dc2);
+    rom_write16(0x2b96, 0xb5c0);
+    rom_write16(0x2b18, 0x2500);
+    rom_write16(0x2acc, 0xb510);
+    rom_write16(0x2cfc, 0xed51);
+    rom_write16(0x2cfe, 0x6487);
+    rom_write16(0x3854, 0xb500);
+    rom_write16(0x38d8, 0x4649);
+    rom_write16(0x389c, 0x4659);
 
     /* Pointers at 0x14/0x16/0x18 */
     rom_write16(ROM_FUNC_TABLE_PTR, 0x0100);
@@ -477,10 +507,10 @@ static int rom_intercept_flash(uint32_t pc) {
 }
 
 int rom_intercept(uint32_t pc) {
-    /* Float function interception */
+    /* Float function interception (4-byte stub stride, V1 order) */
     if (pc >= ROM_FLOAT_FUNC_BASE &&
-        pc < ROM_FLOAT_FUNC_BASE + ROM_FLOAT_FUNC_COUNT * 2) {
-        int idx = (pc - ROM_FLOAT_FUNC_BASE) / 2;
+        pc < ROM_FLOAT_FUNC_BASE + ROM_FLOAT_FUNC_COUNT * 4) {
+        int idx = (pc - ROM_FLOAT_FUNC_BASE) / 4;
         if (rom_intercept_float(idx)) {
             /* Simulate BX LR */
             cpu.r[15] = cpu.r[14] & ~1u;
@@ -489,10 +519,10 @@ int rom_intercept(uint32_t pc) {
         }
     }
 
-    /* Double function interception */
+    /* Double function interception (4-byte stub stride, V1 order) */
     if (pc >= ROM_DOUBLE_FUNC_BASE &&
-        pc < ROM_DOUBLE_FUNC_BASE + ROM_DOUBLE_FUNC_COUNT * 2) {
-        int idx = (pc - ROM_DOUBLE_FUNC_BASE) / 2;
+        pc < ROM_DOUBLE_FUNC_BASE + ROM_DOUBLE_FUNC_COUNT * 4) {
+        int idx = (pc - ROM_DOUBLE_FUNC_BASE) / 4;
         if (rom_intercept_double(idx)) {
             cpu.r[15] = cpu.r[14] & ~1u;
             cpu.step_count++;

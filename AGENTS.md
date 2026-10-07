@@ -13,7 +13,7 @@ the speed of pure-JavaScript emulators (rp2040js, GhostRoboticsLab/rp2350js_emul
 
 ## Why Pico-emu
 
-- v1.0.4, 495 tests passing
+- v1.0.4, 507 tests passing
 - Complete RP2040 + RP2350 (ARM + RISC-V Hazard3)
 - ALL peripherals: UART, SPI, I2C, PWM, ADC, DMA, PIO, GPIO, USB, WiFi (CYW43),
   SD card, eMMC, networking (TAP/W5500/virtual Ethernet), sensors (BME280)
@@ -75,7 +75,7 @@ Pico-emu/
 │   └── rp2350_arm/
 │       └── m33_cpu.c       # Cortex-M33 core
 ├── include/                 # Header files
-├── tests/                   # Test suite (495 tests)
+├── tests/                   # Test suite (507 tests)
 ├── test-firmware/           # Test firmware binaries
 ├── docs/                    # Documentation
 ├── CMakeLists.txt           # Native build (CMake)
@@ -263,7 +263,7 @@ Key strategies to maximize WASM speed:
 
 ### Phase 6: Test & Validate
 
-1. Run existing 474 tests via Emscripten (compile test_suite.c to WASM)
+1. Run existing 507 tests via Emscripten (compile test_suite.c to WASM)
 2. Boot `hello_world.uf2` in browser, verify UART output
 3. Boot `littleos.uf2` in browser, verify OS boots
 4. Boot `micropython.uf2`, verify REPL works

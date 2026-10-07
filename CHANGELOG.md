@@ -1,5 +1,157 @@
 # Pico-emu RP2040/RP2350 Emulator - Changelog
 
+## [Unreleased]
+
+### Fixed - M33 DSP multiply family complete (SMUL/SMLA/SMLAD/SD/W, SMMUL/A/S, USAD8)
+
+The `0x3E380000` HardFault was one instance of a class: the decoder
+only knew MUL/MLA/SMLAD/SMLSD shapes, and every other DSP multiply
+(SMULBB/BT/TB/TT, SMLABB/…, SMLAD/X + SMLSD/X + SMUAD/X + SMUSD/X,
+SMULW + SMLAW, SMMUL/R + SMMLA/R, SMMLS/R, USAD8/USADA8) fell into
+`ldst_single` and could alias `Rt=15` into a wild PC load. All shapes
+now decode (encodings verified against capstone, semantics against
+unicorn as a differential oracle, vectors in `test_m33_dsp_*`; Q on
+accumulate overflow; `Rd==15` declined). Residual FA–FF without a
+decode faults loudly instead of misdecoding. Live proof: Adafruit
+SSD1306 `display()` + 4-minute burn-in, zero faults.
+
+### Fixed - M33 MicroPython RP2350 boot hang (IO_QSPI routing + STATUS model)
+
+The real `micropython-rp2350-arm` image spun forever in a QSPI-timing
+wait polling IO_QSPI SD1 STATUS OUTTOPAD (bit 9). On RP2350 that block
+lives at `0x40030000`, but the bus routed it to the RP2040 BUSCTRL
+stub (hard zero) — and IO_QSPI STATUS itself was a hard-zero stub.
+Fix (`src/membus.c`): arch-aware routing (RP2350 `0x40030000` → IO_QSPI
+model, real RP2350 BUSCTRL `0x40068000` → busctrl model; RP2040 path
+untouched) + STATUS computed from pad control (OUTTOPAD/OETOPAD/
+INFROMPAD; flash bus idles high). Live proof: stock image boots to
+`MicroPython v1.28.0 ... Pico2 with RP2350` + `>>>` over USB-CDC.
+New test: `test_ioqspi_rp2350_status` (routing both modes + overrides).
+
+### Fixed - RV32 boot ebreak park (Hazard3 MEICONTEXT reset)
+RV32 images died in SDK startup on `csrr a5,0xBE5` → NOIRQ check →
+`ebreak` → trap park (`j .`, `mcause=3`). CSR `0xBE5` is Hazard3
+**MEICONTEXT**, whose silicon reset is `0x8000` (NOIRQ, bit 15); we
+returned 0 — and the header even had the address wrong (`0xBE6`,
+unused). Fix (`rv_cpu.h`, `rv_cpu.c`): correct address + reset
+`0x8000` (writes store through). Live proof: RV32_TICK image prints
+`RV32_BOOT` + repeating `RV32_TICK` over UART0. New tests:
+`test_rv32_tick_serial` (hand-encoded RV32 guest prints `RV32_TICK`
+in-process) + `web/rv32_tick.uf2` sweep guest (`gen_rv32.py`).
+MEICONTEXT NOIRQ/IRQ now tracks live CLINT state (lowest
+enabled-pending number, `test_rv_meicontext_reset`).
+
+### Added - PIO FIFO taps (`tx_push`/`rx_pop`/`state`)
+
+`picoemu_pio_tx_push` feeds words TO a PIO program (I2S-out samples,
+WS2812 pixels), `picoemu_pio_rx_pop` observes words FROM it (I2S-in,
+captures), `picoemu_pio_state` reads pc + FIFO levels + stalled (any
+out-param nullable; `-1` on bad index/full/empty). All three in the
+WASM export list; `test_pio_taps` covers fill/full/state/empty.
+FC/FD coprocessor residuals now decline loudly like FA/FB/FE/FF
+(`test_m33_dsp_coproc_gap_loud`). M33 RP2350-MP USB-CDC input proven
+in-harness (`test-wasm-mp2350.mjs`: `print(6*7)` → `42`); genuine
+RP2350-ARM image vendored (`web[/firmware]/micropython_rp2350.uf2`
+were mislabeled RP2040 copies).
+
+### Fixed - eth boards detached by SDD re-provisioning (sweep 12x eth FAIL)
+
+`sdd_init()` clean-slate detach (stale-context fix) runs in `main.c`
+*after* `w5500/w6300_board_attach()`; both boards attach directly to
+SPI outside the registry, so the detach wiped their callbacks and
+every eth guest failed `VERSIONR` reads. Fix (`main.c`,
+`picoemu_wasm.c`): re-attach enabled boards after SDD provisioning,
+only onto empty slots (explicit `-sdd spimirror` keeps a claimed bus;
+SD/eMMC still win). Verified: sweep back to 71/71.
+
+### Fixed - PWM enable alias (CSR_EN runs the slice; tap reports enabled=1)
+
+`picoemu_pwm_read` ANDed two independent states (CSR_EN + global EN
+bit), so Arduino `analogWrite()` (SDK `pwm_init(..., start=true)`
+sets **only** CSR_EN; the global EN register is never touched on
+this path) reported `enabled=0` and the simulator LED stayed dark —
+even though freq/duty were correct. Per the datasheet the global EN
+register **aliases** the CSR_EN bits (one physical bit per slice):
+`src/pwm.c` now syncs both directions (CSR writes update the EN bit;
+EN-register writes drive CSR_EN, both chip layouts), and the tap
+reports the CSR bit. Signature/units unchanged (Hz + basis points).
+Verified: guest `analogWrite(16,192)` → `enabled=1`, duty 7529
+(75.29%). New tests: native `test_pwm_en_alias` (both directions +
+SET-alias) and `test-wasm-pwm.mjs` (direct-register + guest-driven
+acceptance).
+
+### Fixed - analogWrite hang (RP2040 ROM float table: version byte + 32-bit V1 layout)
+
+Stock Arduino `analogWrite()` hung the M0 core before any serial
+output (zero bytes, not even the pre-call print). Root cause, traced
+via PC sampling + ELF disassembly + RAM-slot inspection: the ROM
+model reported version 0 (`rp2040_rom_version()` reads **0x13**, we
+planted 1 at 0x12), so the SDK's float init skipped its table copy
+and every ROM-routed float op jumped to address 0, executing ROM
+zeros as a NOP-slide inside `analogWrite`'s clkdiv loop. Fix, all in
+the ROM model (`src/rom.c`, `include/rom.h`): report B0
+(`rom_image[0x13] = 1`), plant the V1 content sentinels the SDK
+asserts, and store **32-bit** stub addresses in silicon V1 order
+(the SDK copies them word-wise; the old 16-bit layout made it
+concatenate entry pairs into garbage pointers like `0x050B0508`,
+then HardFault). Double table likewise (`0x0460`, stride-4 stubs at
+`0x0560`); intercept index is now `(pc-BASE)/4`. Verified live:
+Arduino `analogWrite(16,192)` sketch prints S/T over USB CDC, slice 0
+shows CSR/TOP/CC/FUNCSEL correctly programmed, full float loops
+terminate with sane scale (1020). New regression test
+`test_rom_float_table_v1` (magic/version/table/functional FMUL).
+Note: the first CDC byte pre-enum is still dropped identically in the
+control sketch (pre-existing TinyUSB/model quirk, unrelated), and
+`picoemu_pwm_read`'s A/B labels look swapped vs silicon CC halves
+(runner-visible tap detail, left for the owner).
+
+### Fixed - scan-bridge lockdown, ARM sleep wakeup (TIMER1), SDD re-provisioning
+
+**Scan path: verified, no engine change** (`src/i2c_bitbang.c` untouched):
+a native SIO-stimulus repro driving the exact MicroPython soft-I2C
+sequence (START → addr → ACK sample → STOP, plus a full 0x08–0x77 sweep,
+both chip modes, DW block enabled) proves scan probes already reach the
+SDD callbacks via the GPIO bit-bang bridge — `0x3C` ACKs with
+`START|0x3C, STOP` in the jsmirror ring, all other addresses NACK and
+stay ring-silent (matching the DW abort path; zero-length DW writes are
+register-invisible by SDK design, so `DATA_CMD` handling is deliberately
+untouched). New regression tests `test_bb_full_scan` (112-probe sweep
+finds exactly `[0x3C]`, guards tracker/pend exhaustion) and the DW
+no-abort sanity. If live `scan()` still reports `[]`, the bridge is
+exonerated — check runner-side mirror-attach timing vs. the scan.
+
+**ARM sleep wakeup** (`src/picoemu_wasm.c`, `src/rp2350_rv/rp2350_periph.c`):
+the browser ARM fast-forward block advanced SysTick/TIMER0/RTC but never
+`TIMER1` (every other FF path — native, corepool, both RV loops — already
+did), so TIMER1-armed alarm-pool sleeps could never fire their HW alarm
+in-browser. Added the missing `rp2350_timer1_tick` plus a
+`rp2350_timer1_next_wakeup_us` deadline folded into the FF chunk
+(TIMER0-only chunking overshot TIMER1 alarms). If an alarm IRQ then
+vectors into the M33 fault, that half belongs to the M33-fault
+workstream.
+
+**SDD re-provisioning** (`src/sdd.c`, `src/i2c.c`, `src/spi.c`):
+`sdd_init()` now frees prior contexts and detaches bus callbacks
+(`i2c_detach_all_devices`, `spi_detach_all_devices`) before clearing the
+registry — repeat `sdd_add` no longer leaves orphaned entries ACKing.
+New test `test_sdd_readd_detaches`. Boot/single-add behavior unchanged
+(bit-identical with no `sdd_add`).
+
+Verified: 497/497 unit tests (2 new), M0 `i2c/spi/adc/pwm_test.uf2`
+green, WASM rebuild green. SPI/ADC/PWM taps untouched (already exported:
+`_picoemu_spimirror_{pending,drops,pop,inject}`,
+`_picoemu_adc_set/get`, `_picoemu_pwm_read`, `_picoemu_cycle_count`).
+
+### Regression watch - wasm I2C/jsmirror coverage (OLED-cell class)
+
+`test-wasm-i2c.mjs` (direct DW writes over the exact runner
+`sdd_add`→`mem_write32`→`pending/pop` sequence, incl. NACK-abort and
+repeat-`sdd_add`) and `test-wasm-mp-i2c.mjs` (full live path: bundled
+MicroPython REPL `machine.I2C.writeto` → ring, runner-faithful
+attach-before-reset order) — both PASS against the 6.0.9 build, so a
+future "zero bytes reach JS" regression fails loudly instead of
+surfacing as a blank OLED.
+
 ## [1.0.4] - 2026-10-06
 
 ### Added - simulator hook contract (I2C scan-ACK, sleep/wakeup, SPI/ADC/PWM taps) + M33 SMULBB HardFault fix

@@ -359,6 +359,32 @@ void rp2350_timer1_tick(rp2350_periph_state_t *state, uint32_t us) {
     }
 }
 
+uint32_t rp2350_timer1_next_wakeup_us(rp2350_periph_state_t *state) {
+    rp2350_timer1_state_t *t;
+    uint32_t now, best = 0xFFFFFFFF;
+    int found, i;
+    if (!state) return 1000;
+    t = &state->timer1;
+    if (t->paused) return 1000;
+    now = (uint32_t)(t->time_us & 0xFFFFFFFF);
+    found = 0;
+    for (i = 0; i < 4; i++) {
+        uint32_t dt;
+        if (!(t->armed & (1u << i)))
+            continue;
+        found = 1;
+        if ((int32_t)(now - t->alarm[i]) >= 0) {
+            return 1;  /* already due: minimal step still fires it */
+        }
+        dt = t->alarm[i] - now;
+        if (dt < best)
+            best = dt;
+    }
+    if (!found)
+        return 1000;  /* nothing armed: same idle chunk as TIMER0 */
+    return best;
+}
+
 /* ========================================================================
  * Unified Read/Write Dispatch
  * ======================================================================== */

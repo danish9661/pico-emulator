@@ -292,6 +292,12 @@ int i2c_attach_device(int i2c_num, uint8_t addr,
     return 0;
 }
 
+void i2c_detach_all_devices(void) {
+    for (int i = 0; i < 2; i++) {
+        i2c_state[i].device_count = 0;
+    }
+}
+
 /* Bit-bang (GPIO) slave bridge: same device registry as the DW
  * controller, so soft-I2C masters see the same slaves. */
 

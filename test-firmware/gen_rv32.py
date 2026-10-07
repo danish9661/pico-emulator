@@ -212,6 +212,21 @@ d.pstr("Elapsed time: (see debug output)\n")
 d.pstr("Timer Test Complete!\n")
 DEMOS.append(d)
 
+# --- rv32 serial tick (engine acceptance: RV32 serial path in-harness) ---
+d = Demo("rv32_tick", "RV32 Serial Tick")
+d.pstr("RV32_TICK 0\n")
+d.emit("li t2, 200000")
+d.emit("tick_delay:")
+d.emit("addi t2, t2, -1")
+d.emit("bnez t2, tick_delay")
+d.pstr("RV32_TICK 1\n")
+d.emit("li t2, 200000")
+d.emit("tick_delay2:")
+d.emit("addi t2, t2, -1")
+d.emit("bnez t2, tick_delay2")
+d.pstr("RV32_TICK 2\n")
+DEMOS.append(d)
+
 # --- peripheral register demos (RP2350 bases) ---
 simple_reg_demo("spi_rv32", "SPI Test",
                 "SPI Test Starting (SPI PL022 0x40080000)\n",

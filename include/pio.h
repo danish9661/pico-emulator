@@ -188,6 +188,14 @@ void     pio_write32(int pio_num, uint32_t offset, uint32_t val);
 /* Step all enabled state machines in all PIO blocks (call from main loop) */
 void     pio_step(void);
 
+/* JS taps: FIFO observe/inject + state readback for PIO cells
+ * (I2S audio, WS2812, sensors). Any out-param may be NULL.
+ * Returns 0 ok, -1 on bad index (push: also full; pop: also empty). */
+int picoemu_pio_tx_push(int block, int sm, uint32_t word);
+int picoemu_pio_rx_pop(int block, int sm, uint32_t *word);
+int picoemu_pio_state(int block, int sm, uint32_t *pc, uint32_t *txlevel,
+                      uint32_t *rxlevel, int *stalled);
+
 /* Execute one PIO instruction on a specific SM */
 void     pio_sm_exec(int pio_num, int sm_num, uint16_t instr);
 

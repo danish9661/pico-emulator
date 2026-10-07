@@ -99,6 +99,9 @@ static uint32_t sysinfo_read(uint32_t offset) {
  * ======================================================================== */
 
 #define BUSCTRL_BASE 0x40030000
+/* RP2350 moved BUSCTRL to 0x40068000; 0x40030000 is IO_QSPI there
+ * (routed above in RP2350 mode). */
+#define BUSCTRL_BASE_RP2350 0x40068000
 
 static uint32_t busctrl_bus_priority = 0;
 static uint32_t busctrl_perfsel[4] = {0x1F, 0x1F, 0x1F, 0x1F};  /* Reset value */
@@ -106,6 +109,9 @@ static uint32_t busctrl_perfctr[4] = {0, 0, 0, 0};
 
 static int busctrl_match(uint32_t addr) {
     uint32_t base = addr & ~0x3000;
+    extern int membus_rp2350_mode;
+    if (membus_rp2350_mode)
+        return base >= BUSCTRL_BASE_RP2350 && base < BUSCTRL_BASE_RP2350 + 0x1000;
     return base >= BUSCTRL_BASE && base < BUSCTRL_BASE + 0x1000;
 }
 
@@ -151,15 +157,50 @@ static void busctrl_write(uint32_t offset, uint32_t val) {
 
 #define IO_QSPI_BASE        0x40018000
 #define IO_QSPI_BLOCK_SIZE  0x60
+/* RP2350 moved IO_QSPI to 0x40030000 (RP2040 BUSCTRL's address!);
+ * without arch-aware routing, RP2350 guests hit the BUSCTRL stub
+ * (all-zero) and MicroPython hangs polling QSPI SD1 STATUS. */
+#define IO_QSPI_BASE_RP2350 0x40030000
 
 /* Store CTRL registers for 6 QSPI GPIOs + interrupt registers */
 static uint32_t io_qspi_ctrl[6];     /* CTRL for SCLK, SS, SD0-SD3 */
 static uint32_t io_qspi_inte;
 static uint32_t io_qspi_intf;
 
+static uint32_t io_qspi_active_base(void) {
+    extern int membus_rp2350_mode;
+    return membus_rp2350_mode ? IO_QSPI_BASE_RP2350 : IO_QSPI_BASE;
+}
+
 static int io_qspi_match(uint32_t addr) {
     uint32_t base = addr & ~0x3000;
-    return (base >= IO_QSPI_BASE && base < IO_QSPI_BASE + IO_QSPI_BLOCK_SIZE);
+    uint32_t qbase = io_qspi_active_base();
+    return (base >= qbase && base < qbase + IO_QSPI_BLOCK_SIZE);
+}
+
+/* IO_QSPI GPIO STATUS from pad control state. OUTTOPAD = driven output
+ * level: explicit override wins, else the peripheral/SIO output, which
+ * idles high on the flash bus (pulled MISO). OETOPAD likewise from
+ * OEOVER (0 unless forced); INFROMPAD reads pulled-high. This is what
+ * lets RP2350 flash/QMI bring-up poll QSPI SD1 STATUS instead of
+ * hanging on a hard-zero stub. */
+static uint32_t io_qspi_status(int pin) {
+    uint32_t ctrl = (pin >= 0 && pin < 6) ? io_qspi_ctrl[pin] : 0;
+    uint32_t outover = (ctrl >> 12) & 3u;
+    uint32_t oeover = (ctrl >> 14) & 3u;
+    uint32_t out;
+    if (outover == 3) out = 1;
+    else if (outover == 2) out = 0;
+    else {
+        out = 1;  /* peripheral/SIO output idles high */
+        if (outover == 1) out ^= 1u;
+    }
+    uint32_t oe = (oeover == 3) ? 1u : 0u;
+    uint32_t v = 0;
+    if (out) v |= (1u << 9);   /* OUTTOPAD */
+    if (oe) v |= (1u << 13);   /* OETOPAD */
+    v |= (1u << 17);           /* INFROMPAD: pulled high */
+    return v;
 }
 
 uint32_t io_qspi_read(uint32_t offset) {
@@ -168,7 +209,7 @@ uint32_t io_qspi_read(uint32_t offset) {
         uint32_t pin = offset / 8;
         uint32_t reg = offset % 8;
         if (pin < 6) {
-            if (reg == 0) return 0;  /* STATUS: always 0 */
+            if (reg == 0) return io_qspi_status((int)pin);
             if (reg == 4) return io_qspi_ctrl[pin];
         }
         return 0;

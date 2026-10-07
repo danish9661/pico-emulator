@@ -587,6 +587,16 @@ int picoemu_step(int n_instructions) {
             int c1gone = (ncores <= 1 || cpu_is_halted_core(1) || cores[1].is_wfi);
             if (c0sleep && c1gone) {
                 uint32_t chunk_us = timer_next_wakeup_us();
+                /* TIMER1 (RP2350 SDK alarm-pool home) has its own
+                 * deadline: without the min() the chunk overshoots
+                 * TIMER1 alarms, and without the tick below the HW
+                 * alarm never fires in-browser, so alarm-pool sleeps
+                 * (MicroPython time.sleep) never wake via IRQ. */
+                if (membus_rp2350_mode && membus_rp2350_periph) {
+                    uint32_t t1 = rp2350_timer1_next_wakeup_us(
+                        (rp2350_periph_state_t *)membus_rp2350_periph);
+                    if (t1 < chunk_us) chunk_us = t1;
+                }
                 if (chunk_us > 10000) chunk_us = 10000;
                 if (chunk_us == 0) chunk_us = 1;
                 uint32_t cpus = timing_config.cycles_per_us ?
@@ -595,6 +605,10 @@ int picoemu_step(int n_instructions) {
                 if (ncores > 1) systick_tick_for_core(1, chunk_us * cpus);
                 timer_tick(chunk_us);
                 rtc_tick(chunk_us);
+                if (membus_rp2350_mode && membus_rp2350_periph) {
+                    rp2350_timer1_tick((rp2350_periph_state_t *)membus_rp2350_periph,
+                                       chunk_us);
+                }
                 for (int c = 0; c < ncores; c++) {
                     if (!cores[c].is_wfi) continue;
                     int saved = get_active_core();
@@ -849,7 +863,18 @@ void picoemu_w6300_gw_enable(int on) {
 int picoemu_sdd_add(const char *arg) {
     if (!arg) return -1;
     sdd_init();
-    return sdd_create_from_arg((char*)arg);
+    int rc = sdd_create_from_arg((char*)arg);
+    /* Boards are direct SPI attaches, not registry members: the
+     * clean-slate detach wiped them. Put enabled boards back onto
+     * empty slots only, so an explicit spimirror that claimed the
+     * bus keeps it (same rule as the native CLI path). */
+    if (w5500_board_enabled() &&
+        spi_state[w5500_board_spi()].device.xfer == NULL)
+        w5500_board_reattach();
+    if (w6300_board_enabled() &&
+        spi_state[w6300_board_spi()].device.xfer == NULL)
+        w6300_board_reattach();
+    return rc;
 }
 /* ETH mesh RX from BroadcastChannel/WebSocket proxy -> vnet */
 static int eth_from_gateway = 0;  /* guard: don't mirror gateway frames back */

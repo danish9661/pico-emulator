@@ -23,6 +23,17 @@ void pwm_init(void) {
     }
 }
 
+/* Sync every slice CSR_EN from the global EN mask (alias write). */
+static void pwm_sync_csr_from_en(void) {
+    int n = pwm_nslices();
+    for (int i = 0; i < n; i++) {
+        if (pwm_state.en & (1u << (uint32_t)i))
+            pwm_state.slice[i].csr |= PWM_CSR_EN;
+        else
+            pwm_state.slice[i].csr &= ~PWM_CSR_EN;
+    }
+}
+
 int pwm_match(uint32_t addr) {
     uint32_t base = addr & ~0x3000;
     if (base >= PWM_BASE && base < PWM_BASE + PWM_BLOCK_SIZE)
@@ -89,7 +100,13 @@ void pwm_write32(uint32_t offset, uint32_t val) {
         pwm_slice_t *s = &pwm_state.slice[slice];
 
         switch (reg) {
-        case PWM_CH_CSR: s->csr = val & 0xFF; break;
+        case PWM_CH_CSR:
+            s->csr = val & 0xFF;
+            /* EN is one physical bit per slice, aliased by the global
+             * EN register (datasheet): keep them in sync both ways. */
+            if (s->csr & PWM_CSR_EN) pwm_state.en |= (1u << (uint32_t)slice);
+            else pwm_state.en &= ~(1u << (uint32_t)slice);
+            break;
         case PWM_CH_DIV: s->div = val & 0x0FFF; break;
         case PWM_CH_CTR: s->ctr = val & 0xFFFF; break;
         case PWM_CH_CC:  s->cc  = val; break;
@@ -103,6 +120,7 @@ void pwm_write32(uint32_t offset, uint32_t val) {
     switch (offset) {
     case PWM_RP2350_EN:
         pwm_state.en = val & PWM_ALL_SLICES;
+        pwm_sync_csr_from_en();
         break;
     case PWM_RP2350_INTR:
         /* Write-1-to-clear */
@@ -129,6 +147,7 @@ void pwm_write32(uint32_t offset, uint32_t val) {
         switch (offset) {
         case PWM_EN:
             pwm_state.en = val & 0xFF;
+            pwm_sync_csr_from_en();
             break;
         case PWM_INTR:
             pwm_state.intr &= ~(val & 0xFF);
@@ -170,8 +189,9 @@ int picoemu_pwm_read(int slice, uint32_t *freq_hz, uint32_t *duty_a,
     uint32_t db = denom ? (uint32_t)(((uint64_t)ccb * 10000ull) / denom) : 0;
     if (da > 10000u) da = 10000u;
     if (db > 10000u) db = 10000u;
-    int en = ((s->csr & PWM_CSR_EN) &&
-              (pwm_state.en & (1u << (uint32_t)slice))) ? 1 : 0;
+    /* Single physical enable bit per slice (CSR_EN aliased by the
+     * global EN register): report the CSR bit. */
+    int en = (s->csr & PWM_CSR_EN) ? 1 : 0;
     if (freq_hz) *freq_hz = (uint32_t)freq;
     if (duty_a) *duty_a = da;
     if (duty_b) *duty_b = db;

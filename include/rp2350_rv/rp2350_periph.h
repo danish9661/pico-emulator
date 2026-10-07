@@ -151,4 +151,10 @@ void rp2350_periph_write8(rp2350_periph_state_t *state, uint32_t addr, uint8_t v
 /* Timer1 tick (called from CLINT tick) */
 void rp2350_timer1_tick(rp2350_periph_state_t *state, uint32_t us);
 
+/* Time until the next armed TIMER1 alarm fires, in microseconds.
+ * Same contract as timer_next_wakeup_us (1 when already due, 1000 when
+ * idle): WFI/WFE fast-forward takes the min so TIMER1-armed sleeps
+ * (RP2350 SDK alarm pool) wake on time. Pure: no NVIC side effects. */
+uint32_t rp2350_timer1_next_wakeup_us(rp2350_periph_state_t *state);
+
 #endif /* RP2350_PERIPH_H */

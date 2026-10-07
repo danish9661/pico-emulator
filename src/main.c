@@ -1168,6 +1168,18 @@ skip_fuse:
         }
     }
 
+    /* Boards attach directly to SPI (not via the SDD registry), so the
+     * sdd_init() clean-slate detach above wiped their bus callbacks.
+     * Put enabled boards back — but only onto empty slots: an explicit
+     * -sdd device (e.g. spimirror) that claimed the bus keeps it.
+     * SD/eMMC attach next and still win on conflict, as documented. */
+    if (w5500_board_enabled() &&
+        spi_state[w5500_board_spi()].device.xfer == NULL)
+        w5500_board_reattach();
+    if (w6300_board_enabled() &&
+        spi_state[w6300_board_spi()].device.xfer == NULL)
+        w6300_board_reattach();
+
     /* SD card initialization */
     if (sdcard_path) {
         if (sdcard_init(&sdcard, sdcard_path, sdcard_size) < 0) {
@@ -1759,7 +1771,8 @@ skip_fuse:
     if (arch == ARCH_RV32) {
         fprintf(stderr, "[RV HART STATUS]\n");
         for (int i = 0; i < 2; i++) {
-            fprintf(stderr, "[HART%d] Status: %s\n", i, rv_cores[i].is_halted ? "HALTED" : "RUNNING");
+            fprintf(stderr, "[HART%d] Status: %s%s\n", i, rv_cores[i].is_halted ? "HALTED" : "RUNNING",
+                    rv_cores[i].is_wfi ? " [WFI]" : "");
             fprintf(stderr, "[HART%d] PC=0x%08X SP=0x%08X RA=0x%08X SavedRA=0x%08X\n",
                     i, rv_cores[i].pc, rv_cores[i].x[2], rv_cores[i].x[1],
                     rv_mem_read32(&rv_bus, rv_cores[i].x[2] + 28));

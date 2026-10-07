@@ -1015,3 +1015,40 @@ void pio_write32(int pio_num, uint32_t offset, uint32_t val) {
 
     pio_check_irq(pio_num);
 }
+
+/* ========================================================================
+ * JS taps: PIO FIFO observe/inject + state readback (I2S-audio and other
+ * PIO cells drive/consumed through these FIFOs; the runner owns the
+ * component models, the engine is the electrical endpoint).
+ * TX push feeds data TO a PIO program (e.g. I2S-out samples, WS2812
+ * pixels); RX pop observes data FROM it (e.g. I2S-in samples).
+ * Any out-param may be NULL. 0 ok, -1 bad index/full/empty.
+ * ======================================================================== */
+static pio_sm_t *pio_tap_sm(int block, int sm) {
+    if (block < 0 || block >= PIO_NUM_BLOCKS) return NULL;
+    if (sm < 0 || sm >= PIO_NUM_SM) return NULL;
+    return &pio_state[block].sm[sm];
+}
+
+int picoemu_pio_tx_push(int block, int sm, uint32_t word) {
+    pio_sm_t *s = pio_tap_sm(block, sm);
+    if (!s) return -1;
+    return fifo_push(&s->tx_fifo, word) ? 0 : -1;
+}
+
+int picoemu_pio_rx_pop(int block, int sm, uint32_t *word) {
+    pio_sm_t *s = pio_tap_sm(block, sm);
+    if (!s || !word) return -1;
+    return fifo_pop(&s->rx_fifo, word) ? 0 : -1;
+}
+
+int picoemu_pio_state(int block, int sm, uint32_t *pc, uint32_t *txlevel,
+                      uint32_t *rxlevel, int *stalled) {
+    pio_sm_t *s = pio_tap_sm(block, sm);
+    if (!s) return -1;
+    if (pc) *pc = s->pc;
+    if (txlevel) *txlevel = s->tx_fifo.count;
+    if (rxlevel) *rxlevel = s->rx_fifo.count;
+    if (stalled) *stalled = s->stalled ? 1 : 0;
+    return 0;
+}

@@ -1918,8 +1918,60 @@ TEST(test_bb_scan_ack) {
     PASS();
 }
 
-TEST(test_bb_write_reaches_mirror) {
-    /* Bit-banged data bytes land in the slave + mirror ring. */
+TEST(test_bb_full_scan) {
+    /* Full machine.I2C.scan() sweep: 0x08-0x77 back-to-back probes.
+     * Exactly [0x3C] ACKs (guards tracker/pend exhaustion across
+     * consecutive probes); the ring holds only the live probe's pair
+     * (NACKed probes stay silent, like the DW abort path). */
+    reset_cpu();
+    sdd_init();
+    {
+        int addrs[] = { 0x3C };
+        sdd_create_jsmirror(0, addrs, 1);
+    }
+    bb_setup(8, 9);
+    int found = 0, last = -1;
+    for (int a = 0x08; a <= 0x77; a++) {
+        if (bb_probe(8, 9, (uint8_t)a)) { found++; last = a; }
+    }
+    ASSERT_EQ(1, found, "scan finds one slave");
+    ASSERT_EQ(0x3C, last, "scan finds 0x3C");
+    ASSERT_EQ(2, picoemu_jsmirror_pending(), "ring: live probe pair only");
+    {
+        uint16_t e[4];
+        int n = picoemu_jsmirror_pop(e, 4);
+        ASSERT_EQ(2, n, "pop 2 entries");
+        ASSERT_EQ(0x13C, e[0], "START|0x3C");
+        ASSERT_EQ(0x200, e[1], "STOP");
+    }
+    sdd_cleanup();
+    PASS();
+}
+
+TEST(test_sdd_readd_detaches) {
+    /* Repeat sdd_add must not leave stale slaves: re-init drops the
+     * mirror, so 0x3C NACKs on both paths (was: orphaned ctx stayed
+     * attached to the DW bridge and kept ACKing). */
+    reset_cpu();
+    sdd_init();
+    {
+        int addrs[] = { 0x3C };
+        sdd_create_jsmirror(0, addrs, 1);
+    }
+    bb_setup(8, 9);
+    ASSERT_EQ(1, bb_probe(8, 9, 0x3C), "mirror ACKs before re-add");
+    sdd_init();  /* repeat provisioning, no devices */
+    ASSERT_EQ(0, bb_probe(8, 9, 0x3C), "stale mirror gone after re-add");
+    ASSERT_EQ(0, picoemu_jsmirror_pending(), "ring clean after re-add");
+    mem_write32(I2C0_BASE + I2C_DATA_CMD, 0x00);
+    ASSERT_TRUE((mem_read32(I2C0_BASE + I2C_TX_ABRT_SOURCE) &
+                 I2C_TX_ABRT_7B_ADDR_NOACK) != 0,
+                "DW path NACKs detached address");
+    sdd_cleanup();
+    PASS();
+}
+
+TEST(test_bb_write_reaches_mirror) {    /* Bit-banged data bytes land in the slave + mirror ring. */
     reset_cpu();
     sdd_init();
     {
@@ -2019,8 +2071,111 @@ TEST(test_reset_clears_wfi_flags) {
     PASS();
 }
 
-TEST(test_spimirror_observe_inject) {
-    /* MOSI bytes + CS frames land in the ring; MISO comes from the
+TEST(test_ioqspi_rp2350_status) {
+    /* RP2350 0x40030000 is IO_QSPI (not BUSCTRL): SD1 STATUS bit 9
+     * (OUTTOPAD) reads the driven level so flash/QMI bring-up polls
+     * terminate (MicroPython RP2350 hung here on a hard-zero stub).
+     * RP2040 mode keeps the BUSCTRL mapping. */
+    reset_cpu();
+    int saved = membus_rp2350_mode;
+    membus_rp2350_mode = 1;
+    uint32_t st = mem_read32(0x40030000u + 3u * 8u);
+    ASSERT_TRUE(st & (1u << 9), "SD1 OUTTOPAD idle-high");
+    ASSERT_TRUE(st & (1u << 17), "SD1 INFROMPAD pulled-high");
+    mem_write32(0x40030000u + 3u * 8u + 4u, (2u << 12) | 5u);
+    st = mem_read32(0x40030000u + 3u * 8u);
+    ASSERT_TRUE(!(st & (1u << 9)), "OUTOVER=LOW clears OUTTOPAD");
+    mem_write32(0x40030000u + 3u * 8u + 4u, (3u << 12) | 5u);
+    st = mem_read32(0x40030000u + 3u * 8u);
+    ASSERT_TRUE(st & (1u << 9), "OUTOVER=HIGH sets OUTTOPAD");
+    mem_write32(0x40030000u + 3u * 8u + 4u, 0u);
+    membus_rp2350_mode = 0;
+    mem_write32(0x40030000u + 0x0Cu, 0x1Fu);
+    ASSERT_EQ(0x1Fu, mem_read32(0x40030000u + 0x0Cu), "RP2040: BUSCTRL perfsel");
+    membus_rp2350_mode = saved;
+    PASS();
+}
+
+TEST(test_rv32_tick_serial) {
+    /* Minimal RV32 guest (hand-encoded, see prologue comment): inits
+     * UART0 and prints "RV32_TICK". Proves the RV32 serial path
+     * in-harness (external RV32 images go silent when boot asserts). */
+    static const uint32_t prog[] = {
+        0x20082137u, /* lui sp, 0x20082 */
+        0x400702b7u, /* lui t0, 0x40070 (UART0) */
+        0x30100313u, /* addi t1, zero, 0x301 */
+        0x0262a823u, /* sw t1, 0x30(t0) (UARTEN|TXE|RXE) */
+        0x20000437u, /* lui s0, 0x20000 (string) */
+        0x00044303u, /* lbu t1, 0(s0) */
+        0x00030863u, /* beqz t1, done */
+        0x0062a023u, /* sw t1, 0(t0) (UART DR) */
+        0x00140413u, /* addi s0, s0, 1 */
+        0xff1ff06fu, /* jal x0, loop */
+        0x0000006fu, /* done: j done */
+    };
+    static const char msg[] = "RV32_TICK\n";
+    reset_cpu();
+    rv_cpu_state_t rv;
+    rv_membus_state_t bus;
+    static uint8_t flash[4096];
+    memset(&bus, 0, sizeof(bus));
+    rv_membus_init(&bus, flash, sizeof(flash), 1);
+    memcpy(flash, prog, sizeof(prog));
+    memcpy(bus.sram, msg, sizeof(msg));
+    rv_cpu_init(&rv, 0);
+    rv.bus = &bus;
+    rv.is_halted = 0;
+    rv.pc = 0x10000000u;
+    expect_capture_cap = 4096;
+    expect_capture_buf = malloc(expect_capture_cap);
+    expect_capture_len = 0;
+    expect_enabled = 1;
+    for (int i = 0; i < 100000; i++) {
+        if (rv.is_halted || rv.is_wfi) break;
+        rv_cpu_step(&rv);
+    }
+    expect_enabled = 0;
+    int found = 0;
+    if (expect_capture_buf && expect_capture_len >= 10) {
+        for (size_t i = 0; i + 10 <= expect_capture_len; i++) {
+            if (memcmp(expect_capture_buf + i, "RV32_TICK\n", 10) == 0) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    free(expect_capture_buf);
+    expect_capture_buf = NULL;
+    ASSERT_TRUE(found, "RV32 guest prints RV32_TICK via UART0");
+    PASS();
+}
+
+TEST(test_rom_float_table_v1) {
+    /* RP2040 ROM float contract (Arduino analogWrite hang): the version
+     * byte at 0x13 must read 1 (B0) so float_init takes the V1 branch;
+     * soft_float/double tables hold 32-bit stub addresses in V1 order
+     * (the SDK copies them word-wise); stubs intercept to native ops. */
+    reset_cpu();  /* runs rom_init */
+    ASSERT_EQ(0x0101754Du, mem_read32(0x10), "ROM magic 'Mu' + version 1");
+    ASSERT_EQ(0x01u, mem_read8(0x13), "ROM version byte reads 1 (B0)");
+    ASSERT_EQ(0x04004653u, mem_read32(0x180), "data table 'SF' -> 0x0400");
+    ASSERT_EQ(0x00000509u, mem_read32(0x400 + 2 * 4), "float FMUL slot -> stub");
+    ASSERT_EQ(0x00000569u, mem_read32(0x460 + 2 * 4), "double FMUL slot -> stub");
+    {
+        /* Functional: 2.0 * 3.0 through the FMUL stub intercept. */
+        uint32_t f2, f3, f6;
+        float fa = 2.0f, fb = 3.0f, fc = 6.0f;
+        memcpy(&f2, &fa, 4); memcpy(&f3, &fb, 4); memcpy(&f6, &fc, 4);
+        cpu.r[0] = f2; cpu.r[1] = f3; cpu.r[14] = 0x10008001u;
+        ASSERT_EQ(1, rom_intercept(0x0508), "FMUL stub intercepts");
+        ASSERT_EQ(f6, cpu.r[0], "2.0*3.0 == 6.0");
+        ASSERT_EQ(0x10008000u, cpu.r[15], "intercept returns via lr");
+    }
+    reset_cpu();
+    PASS();
+}
+
+TEST(test_spimirror_observe_inject) {    /* MOSI bytes + CS frames land in the ring; MISO comes from the
      * inject queue (0xFF idle when empty). */
     reset_cpu();
     sdd_init();
@@ -2100,6 +2255,28 @@ TEST(test_pwm_readback_tap) {
     }
     ASSERT_EQ(-1, picoemu_pwm_read(12, NULL, NULL, NULL, NULL), "bad slice");
     timing_set_clock_mhz(1);
+    PASS();
+}
+
+TEST(test_pwm_en_alias) {
+    /* EN is one physical bit per slice (datasheet: the global register
+     * aliases CSR_EN): CSR-only enable (Arduino analogWrite path) must
+     * read back enabled, and global-EN writes must drive CSR_EN. */
+    reset_cpu();
+    mem_write32(PWM_BASE + PWM_CH_CSR, PWM_CSR_EN);   /* CSR-only, no EN reg */
+    ASSERT_EQ(1u, mem_read32(PWM_BASE + PWM_EN) & 1u, "EN mirrors CSR_EN");
+    {
+        uint32_t hz = 0, da = 0, db = 0;
+        int en = 0;
+        ASSERT_EQ(0, picoemu_pwm_read(0, &hz, &da, &db, &en), "tap ok");
+        ASSERT_EQ(1, en, "tap reports CSR-only enable");
+    }
+    mem_write32(PWM_BASE + PWM_EN, 0x00);             /* global disable */
+    ASSERT_EQ(0u, mem_read32(PWM_BASE + PWM_CH_CSR) & PWM_CSR_EN, "CSR_EN clears");
+    mem_write32(PWM_BASE + REG_ALIAS_SET_BITS + PWM_EN, 0x02);  /* hw_set_bits */
+    ASSERT_EQ(1u, mem_read32(PWM_BASE + 0x14) & PWM_CSR_EN, "slice1 CSR_EN via SET");
+    ASSERT_EQ(0u, mem_read32(PWM_BASE + PWM_CH_CSR) & PWM_CSR_EN, "slice0 still off");
+    reset_cpu();
     PASS();
 }
 
@@ -8582,14 +8759,157 @@ TEST(test_m33_smlabb_qflag) {
     PASS();
 }
 
-TEST(test_m33_dsp_gap_loud) {
-    /* Unimplemented DSP/multiply space (FB3x SMULW, FB7x USAD8) must
+/* Shared DSP test vector (matches the unicorn differential run). */
+static void dsp_test_regs(void) {
+    cpu.r[0] = 0x00020001u;
+    cpu.r[1] = 0x00040003u;
+    cpu.r[2] = 100u;
+    cpu.r[3] = 0x7FFFFFFFu;
+    cpu.r[4] = 0x80000001u;
+    cpu.r[5] = 0x00010002u;
+    cpu.r[6] = 0xFFFF0001u;
+    cpu.xpsr &= ~(1u << 27);
+}
+
+TEST(test_m33_dsp_dual) {
+    /* SMLAD/X + SMLSD/X + SMUAD/X + SMUSD/X (unicorn-blessed). */
+    reset_cpu();
+    uint32_t pc = FLASH_BASE + 0x1000;
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB21, 0x3002), "smlad");
+    ASSERT_EQ(0x8000012Bu, cpu.r[0], "smlad value");
+    ASSERT_TRUE(cpu.xpsr & (1u << 27), "smlad Q");
+    ASSERT_EQ(pc + 4, cpu.r[15], "smlad pc");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB21, 0x3212), "smladx");
+    ASSERT_EQ(0x8000018Fu, cpu.r[2], "smladx value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB41, 0x3002), "smlsd");
+    ASSERT_EQ(0x8000012Bu, cpu.r[0], "smlsd value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB41, 0x3212), "smlsdx");
+    ASSERT_EQ(0x7FFFFE6Fu, cpu.r[2], "smlsdx value");
+    ASSERT_TRUE(!(cpu.xpsr & (1u << 27)), "smlsdx no Q");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB21, 0xF000), "smuad");
+    ASSERT_EQ(0x0Bu, cpu.r[0], "smuad value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB41, 0xF002), "smusd");
+    ASSERT_EQ(0x12Cu, cpu.r[0], "smusd value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB41, 0xF012), "smusdx");
+    ASSERT_EQ(0xFFFFFE70u, cpu.r[0], "smusdx value");
+    PASS();
+}
+
+TEST(test_m33_dsp_mulw) {
+    /* SMULW + SMLAW (unicorn-blessed). */
+    reset_cpu();
+    uint32_t pc = FLASH_BASE + 0x1000;
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB31, 0xF213), "smulwt");
+    ASSERT_EQ(0x1FFFDu, cpu.r[2], "smulwt value");
+    ASSERT_EQ(pc + 4, cpu.r[15], "smulwt pc");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB31, 0x4203), "smlawb");
+    ASSERT_EQ(0x7FFFFFFCu, cpu.r[2], "smlawb value");
+    ASSERT_TRUE(cpu.xpsr & (1u << 27), "smlawb Q");
+    PASS();
+}
+
+TEST(test_m33_dsp_mmul) {
+    /* SMMUL/R + SMMLA/R + SMMLS/R + USAD8/USADA8 (unicorn-blessed). */
+    reset_cpu();
+    uint32_t pc = FLASH_BASE + 0x1000;
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB51, 0xF210), "smmulr");
+    ASSERT_EQ(8u, cpu.r[2], "smmulr value");
+    ASSERT_EQ(pc + 4, cpu.r[15], "smmulr pc");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB61, 0x4210), "smmlsr");
+    ASSERT_EQ(0x7FFFFFF9u, cpu.r[2], "smmlsr value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB61, 0x4200), "smmls");
+    ASSERT_EQ(0x7FFFFFF8u, cpu.r[2], "smmls value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB71, 0x4606), "usada8");
+    ASSERT_EQ(0x800001FDu, cpu.r[6], "usada8 value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB71, 0xF000), "usad8");
+    ASSERT_EQ(4u, cpu.r[0], "usad8 value");
+    dsp_test_regs();
+    ASSERT_EQ(1, thumb32_step(pc, 0xFB51, 0x4200), "smmla");
+    ASSERT_EQ(0x80000009u, cpu.r[2], "smmla value");
+    PASS();
+}
+
+TEST(test_m33_dsp_gap_loud) {    /* Invalid DSP/multiply shapes (bad FB3x op2, USAD8-X) must
      * decline loudly, never misdecode as a load into PC. */
     reset_cpu();
     uint32_t pc = FLASH_BASE + 0x1000;
     cpu.r[15] = pc;
-    ASSERT_EQ(0, thumb32_step(pc, 0xFB30, 0xF000), "smulw space unhandled");
-    ASSERT_EQ(0, thumb32_step(pc, 0xFB70, 0xF000), "usad8 space unhandled");
+    ASSERT_EQ(0, thumb32_step(pc, 0xFB30, 0xF020), "bad FB3x op2 unhandled");
+    ASSERT_EQ(0, thumb32_step(pc, 0xFB70, 0xF010), "usad8-X unhandled");
+    PASS();
+}
+
+TEST(test_m33_dsp_coproc_gap_loud) {
+    /* FCxx/FDxx (coprocessor LDC/STC space) with no decode must decline
+     * loudly like FA/FB/FE/FF, never misdecode as a load into PC. */
+    reset_cpu();
+    uint32_t pc = FLASH_BASE + 0x1000;
+    cpu.r[15] = pc;
+    ASSERT_EQ(0, thumb32_step(pc, 0xFC00, 0x0000), "FC LDC space unhandled");
+    ASSERT_EQ(0, thumb32_step(pc, 0xFD00, 0x0000), "FD STC space unhandled");
+    PASS();
+}
+
+TEST(test_pio_taps) {
+    /* TX push fills (4-deep), 5th fails; state readback; bad index;
+     * RX pop on empty fails. (RX-pop-success needs a running SM;
+     * engine FIFO paths are covered by the PIO peripheral tests.) */
+    reset_cpu();
+    pio_init();
+    ASSERT_EQ(0, picoemu_pio_tx_push(0, 0, 0xA5A5A5A5u), "push 1");
+    ASSERT_EQ(0, picoemu_pio_tx_push(0, 0, 0x12345678u), "push 2");
+    ASSERT_EQ(0, picoemu_pio_tx_push(0, 0, 0xDEADBEEFu), "push 3");
+    ASSERT_EQ(0, picoemu_pio_tx_push(0, 0, 0x0u), "push 4");
+    ASSERT_EQ(-1, picoemu_pio_tx_push(0, 0, 0x0u), "push full");
+    ASSERT_EQ(-1, picoemu_pio_tx_push(3, 0, 0x0u), "bad block");
+    ASSERT_EQ(-1, picoemu_pio_tx_push(0, 4, 0x0u), "bad sm");
+    {
+        uint32_t pc = 99, tx = 99, rx = 99;
+        int stalled = -1;
+        ASSERT_EQ(0, picoemu_pio_state(0, 0, &pc, &tx, &rx, &stalled), "state ok");
+        ASSERT_EQ(4u, tx, "txlevel 4");
+        ASSERT_EQ(0u, rx, "rxlevel 0");
+        ASSERT_EQ(-1, picoemu_pio_state(0, 9, NULL, NULL, NULL, NULL), "state bad sm");
+    }
+    {
+        uint32_t w = 0;
+        ASSERT_EQ(-1, picoemu_pio_rx_pop(0, 0, &w), "rx empty");
+        ASSERT_EQ(-1, picoemu_pio_rx_pop(0, 0, NULL), "rx null");
+    }
+    PASS();
+}
+
+TEST(test_rv_meicontext_reset) {
+    /* MEICONTEXT resets to NOIRQ (0x8000); live IRQ number tracks
+     * enabled-pending state (RV32 boot asserts NOIRQ and ebreaks). */
+    rv_cpu_state_t rv;
+    rv_membus_state_t bus;
+    static uint8_t flash[4096];
+    memset(&bus, 0, sizeof(bus));
+    rv_membus_init(&bus, flash, sizeof(flash), 1);
+    rv_cpu_init(&rv, 0);
+    rv.bus = &bus;
+    ASSERT_EQ(0x8000u, rv_csr_read(&rv, CSR_MEICONTEXT), "reset NOIRQ");
+    rv_clint_set_ext_pending(&bus.clint, 5);
+    bus.clint.ext_enable[0] |= (1ULL << 5);
+    rv.csr[CSR_MEIE0] |= (1u << 5);
+    ASSERT_EQ(0x50u, rv_csr_read(&rv, CSR_MEICONTEXT), "IRQ number live");
+    rv_clint_clear_ext_pending(&bus.clint, 5);
+    ASSERT_EQ(0x8000u, rv_csr_read(&rv, CSR_MEICONTEXT), "NOIRQ back");
     PASS();
 }
 
@@ -9953,17 +10273,23 @@ int main(void) {
     RUN_TEST(test_i2c_read_noack_when_empty);
     RUN_TEST(test_bb_release_restores_pullup);
     RUN_TEST(test_bb_scan_ack);
+    RUN_TEST(test_bb_full_scan);
+    RUN_TEST(test_sdd_readd_detaches);
     RUN_TEST(test_bb_write_reaches_mirror);
+    RUN_TEST(test_rom_float_table_v1);
     RUN_TEST(test_spimirror_observe_inject);
     RUN_TEST(test_spimirror_from_arg);
     RUN_TEST(test_adc_js_tap);
     RUN_TEST(test_pwm_readback_tap);
+    RUN_TEST(test_pwm_en_alias);
     RUN_TEST(test_reset_clears_observer_rings);
     RUN_TEST(test_rv_wfi_wakes_without_mie);
     RUN_TEST(test_rv_timer_bridge_wakes_wfi);
     RUN_TEST(test_timer0_alarm_edge_visible);
     RUN_TEST(test_bb_read_from_slave);
     RUN_TEST(test_reset_clears_wfi_flags);
+    RUN_TEST(test_ioqspi_rp2350_status);
+    RUN_TEST(test_rv32_tick_serial);
     END_CATEGORY("I2C Peripheral");
 
     BEGIN_CATEGORY("PWM Peripheral");
@@ -10259,7 +10585,13 @@ int main(void) {
     RUN_TEST(test_m33_smultt);
     RUN_TEST(test_m33_smlatt);
     RUN_TEST(test_m33_smlabb_qflag);
+    RUN_TEST(test_m33_dsp_dual);
+    RUN_TEST(test_m33_dsp_mulw);
+    RUN_TEST(test_m33_dsp_mmul);
     RUN_TEST(test_m33_dsp_gap_loud);
+    RUN_TEST(test_m33_dsp_coproc_gap_loud);
+    RUN_TEST(test_pio_taps);
+    RUN_TEST(test_rv_meicontext_reset);
     RUN_TEST(test_m33_thumb2_tbb_tbh);
     RUN_TEST(test_m33_thumb2_ldrex_strex);
     RUN_TEST(test_m33_thumb2_vfp_nop);

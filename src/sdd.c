@@ -17,6 +17,13 @@
 sdd_registry_t sdd_registry;
 
 void sdd_init(void) {
+    /* Repeat sdd_add starts from a clean slate: free prior contexts,
+     * then detach their bus callbacks so no stale I2C/SPI entry keeps
+     * pointing at a freed ctx (and keeps ACKing). Single-batch attach
+     * keeps working: attach follows init, same as before. */
+    sdd_cleanup();
+    i2c_detach_all_devices();
+    spi_detach_all_devices();
     memset(&sdd_registry, 0, sizeof(sdd_registry));
     jsmirror_reset();
     spimirror_reset();

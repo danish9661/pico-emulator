@@ -263,3 +263,11 @@ void spi_attach_device(int spi_num, spi_device_xfer_fn xfer,
     spi_state[spi_num].device.cs = cs;
     spi_state[spi_num].device.ctx = ctx;
 }
+
+void spi_detach_all_devices(void) {
+    for (int i = 0; i < 2; i++) {
+        spi_state[i].device.xfer = NULL;
+        spi_state[i].device.cs = NULL;
+        spi_state[i].device.ctx = NULL;
+    }
+}

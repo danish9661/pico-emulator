@@ -1,7 +1,7 @@
 # pico-emu — hook spec (for emulator agent)
 
 Package: `pico-emu` first-party source (`/home/danish1075/Documents/rp2350/Pico-emu`, commit `a47d098`). Our runner: `OpenHW-studio-frontend/src/worker/runners/pico-runner.ts`.
-Status (2026-10): jsmirror is upstreamed in-tree (`src/sdd_jsmirror.c`, `src/sdd.c`, `include/sdd.h`, `build_wasm.sh`) and the simulator vendors the first-party build — the old `vendor/pico-emu-fork/fork.patch` replay is retired (kept for history). All P0/P1 engine items in this spec are now DONE in-tree (scan-ACK bridge, RV TIMER bridge + MIE-free wake, 32-bit sleep hints, SPI/ADC/PWM taps, M33 SMULBB HardFault fix, reset-clears-rings, `_picoemu_cycle_count` sim-time stamp): 495 native tests green, firmware sweep 70/70, WASM rebuild + `test-wasm.js` green. Two deliberate silicon-fidelity exceptions to strict bit-identical-no-sdd_add (both empirically clean across suite+sweep+wasm): DW TX_ABRT on empty addresses (was silent success — required for correct SDK/Arduino NACK codes on the DW path) and open-drain release reading HIGH (was stale latch — required for scan: clock-stretch SCL polling, STOP visibility, ACK sampling). ARM MP sleep live-proven native (`time.sleep(1)` returns, REPL continues); RV sleep unit-proven.
+Status (2026-10): jsmirror is upstreamed in-tree (`src/sdd_jsmirror.c`, `src/sdd.c`, `include/sdd.h`, `build_wasm.sh`) and the simulator vendors the first-party build — the old `vendor/pico-emu-fork/fork.patch` replay is retired (kept for history). All P0/P1 engine items in this spec are now DONE in-tree (scan-ACK bridge, RV TIMER bridge + MIE-free wake, 32-bit sleep hints, SPI/ADC/PWM taps, M33 SMULBB HardFault fix + full DSP family, reset-clears-rings, `_picoemu_cycle_count` sim-time stamp, RP2350 IO_QSPI routing + STATUS model, RV MEICONTEXT reset + live NOIRQ/IRQ tracking, PIO FIFO taps, FC/FD loud-decline): 507 native tests green, firmware sweep 71/71, WASM rebuild + `test-wasm.js` + all four `.mjs` harnesses green. Two deliberate silicon-fidelity exceptions to strict bit-identical-no-sdd_add (both empirically clean across suite+sweep+wasm): DW TX_ABRT on empty addresses (was silent success — required for correct SDK/Arduino NACK codes on the DW path) and open-drain release reading HIGH (was stale latch — required for scan: clock-stretch SCL polling, STOP visibility, ACK sampling). ARM MP sleep live-proven native (`time.sleep(1)` returns, REPL continues); RV sleep unit-proven; M33 RP2350-MP boots to `>>>` live (native + `test-wasm-mp2350.mjs`, incl. USB-CDC `print(6*7)` → `42`); RV32_TICK image prints live.
 
 ## What to add
 
@@ -42,7 +42,31 @@ plus existing `_picoemu_write_uart` (REPL injection) and UART-out poll — all a
    REPL `time.sleep(1)` returns and the interpreter continues
    (`print(time.ticks_ms()-t)` → 395) — the full TIMER-alarm →
    NVIC → WFE-wake → deliver chain works; no avoidance needed on
-   this path. RV sleep is unit-proven (`test_rv_*wfi*`/`test_rv_timer*`).;
+   this path. RV sleep is unit-proven (`test_rv_*wfi*`/`test_rv_timer*`).
+
+9. **M33 MicroPython RP2350 silent hang — FIXED.** The real
+   `micropython-rp2350-arm` image spun forever in a QSPI-timing wait
+   (`ldr r2,[r1,#0x18]; lsls #22; bpl`, SRAM copy of flash
+   `0x1004ED1C`) polling IO_QSPI SD1 STATUS OUTTOPAD (bit 9). On
+   RP2350 that block lives at `0x40030000`, but the bus routed it to
+   the RP2040 BUSCTRL stub (hard zero) — and IO_QSPI STATUS itself
+   was a hard-zero stub. Fix (`src/membus.c`): arch-aware routing
+   (RP2350 `0x40030000` → IO_QSPI model, real RP2350 BUSCTRL
+   `0x40068000` → busctrl model) + STATUS computed from pad control
+   (OUTTOPAD/OETOPAD/INFROMPAD; flash bus idles high). Live proof:
+   stock image boots to `MicroPython v1.28.0 ... Pico2 with RP2350`
+   + `>>>` over USB-CDC. Regression lock: `test_ioqspi_rp2350_status`.
+
+10. **RV32 silent hang (ebreak park) — FIXED.** The RV32_TICK image
+    died in SDK startup on `csrr a5,0xBE5; slli; bltz; ebreak`: CSR
+    `0xBE5` is Hazard3 **MEICONTEXT**, whose reset value is `0x8000`
+    (NOIRQ, bit 15); we returned 0 (and our header even had the
+    address wrong as `0xBE6`). Fix (`rv_cpu.h`, `rv_cpu.c`):
+    correct address + reset `0x8000` (writes store through).
+    Live proof: the image prints `RV32_BOOT` + repeating `RV32_TICK`
+    over UART0. Regression locks: `test_rv32_tick_serial`
+    (hand-encoded RV32 guest prints `RV32_TICK` in-process) +
+    `web/rv32_tick.uf2` sweep guest (`test-firmware/gen_rv32.py`).
 ## M33 HardFault in I2C burst path (ROOT-CAUSED + FIXED 2026-10, was BLOCKING Pico 2)
 
 M33 Arduino faulted deterministically inside Adafruit `display()` I2C
@@ -60,19 +84,27 @@ hit `BX lr` with a stale LR, landed mid-`i2c_write_blocking_internal`,
 and faulted later at `blx r6` with a garbage r6. M0+ is immune because
 M0 code never emits DSP multiplies.
 
-Fix (in-tree): SMULBB/BT/TB/TT + SMLABB/... in `t32_misc`
-(`src/thumb32.c`, Q flag on SMLA overflow, Rd==15 declined loudly),
-plus a safety net — residual FA/FB (DSP/multiply space, never a load)
-now returns unhandled (loud HardFault) instead of misdecoding as a
-load. Also permanent diagnostics: HardFault line now logs the vector
-handler word + faulting halfwords + IT state (`H=/W=/IT=`), a
-callee-saved (r4-r11) entry/return integrity check (`CALLEE-CLOBBER`
-— silent in the full suite), and 32-bit insns are now in `-trace`.
+Fix (in-tree): the full DSP multiply family in `t32_misc`
+(`src/thumb32.c`) — SMULBB/BT/TB/TT + SMLABB/..., SMLAD/X + SMLSD/X
++ SMUAD/X + SMUSD/X (the X halve-swap forms were missing too),
+SMULW + SMLAW, SMMUL/R + SMMLA/R, SMMLS/R, USAD8/USADA8 (Q on
+accumulate overflow, `Rd==15` declined). Every encoding verified
+against capstone as an independent decoder and every semantic against
+unicorn as a differential oracle (vectors in `test_m33_dsp_*`); the
+old SMUSD-shape guess (010X) was wrong per both oracles and is NOT
+matched. Residual FA/FB/FE/FF (DSP/multiply/vector space, never a
+load — loads are F8/F9) now returns unhandled (loud HardFault)
+instead of misdecoding. Also permanent diagnostics: HardFault line
+now logs the vector handler word + faulting halfwords + IT state
+(`H=/W=/IT=`), a callee-saved (r4-r11) entry/return integrity check
+(`CALLEE-CLOBBER` — silent in the full suite), and 32-bit insns are
+now in `-trace`.
 Repro (no browser needed): compile `m33oled.ino` (Adafruit SSD1306
 `display()` loop, Arduino rp2040:rp2040:rpipico2) and run
 `./build/picoemu m33oled.ino.uf2 -arch m33
 -sdd jsmirror:i2c=0,addr=0x3c -timeout 60`: before → instant
-`PC=0x3E380000` fault, after → 220+ clean FRAMEs. Native needs the
+`PC=0x3E380000` fault, after → clean frames (4-minute burn-in, zero
+faults). Native needs the
 CMakeLists `sdd_jsmirror.c` entry (already added).
 Note: native needs no SDK — Arduino CLI + rp2040 core 6.0.0 suffice.
 

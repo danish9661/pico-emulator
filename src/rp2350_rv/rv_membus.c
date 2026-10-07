@@ -5,7 +5,6 @@
  * RP2350-specific regions (520KB SRAM, CLINT, RP2350 peripherals, SIO)
  * are handled here. Shared peripherals fall through to the RP2040 membus.
  */
-
 #include <string.h>
 #include <stdio.h>
 #include "rp2350_rv/rv_membus.h"

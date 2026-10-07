@@ -276,7 +276,7 @@
         </tbody>
       </table>
       <p style="margin-top:8px">Full per-core feature tables live on the <a href="./docs.html">docs page</a>.</p>
-      <p style="font-size:11px;opacity:.75">v1.0.4 · 495 tests green · <a href="https://www.npmjs.com/package/pico-emu">npm i pico-emu</a></p>
+      <p style="font-size:11px;opacity:.75">v1.0.4 · 507 tests green · <a href="https://www.npmjs.com/package/pico-emu">npm i pico-emu</a></p>
     </div>
   </div>
 
@@ -971,7 +971,7 @@ window.devDump = () => {
   } catch(e) { $('dev-status').textContent = 'err ' + e.message; }
 };
 window.runWasmTests = async () => {
-  $('status').textContent = 'See node test-wasm.js (495 tests)';
+  $('status').textContent = 'See node test-wasm.js (507 tests)';
   try {
     const res = await fetch('./picoemu.wasm.wasm');
     $('status').textContent = `WASM ${(await res.arrayBuffer()).byteLength}B ready; run: node test-wasm.js`;

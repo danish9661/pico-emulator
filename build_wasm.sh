@@ -68,6 +68,7 @@ EXPORTS='[
   "_picoemu_spimirror_pending","_picoemu_spimirror_drops","_picoemu_spimirror_pop",
   "_picoemu_spimirror_inject",
   "_picoemu_adc_set","_picoemu_adc_get","_picoemu_pwm_read","_picoemu_cycle_count",
+  "_picoemu_pio_tx_push","_picoemu_pio_rx_pop","_picoemu_pio_state",
   "_picoemu_eth_pop_tx","_picoemu_eth_set_uplink","_picoemu_wifi_enable","_picoemu_board_eth",
   "_picoemu_bt_hci_enable","_picoemu_bt_hci_pop_tx","_picoemu_bt_hci_push_rx",
   "_picoemu_w5500_push_rx","_picoemu_w5500_push_status","_picoemu_ws_send_w5500",

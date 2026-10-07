@@ -116,6 +116,13 @@ void rv_cpu_init(rv_cpu_state_t *cpu, int hart_id) {
     cpu->csr[CSR_MIMPID]    = 0;
     cpu->csr[CSR_MHARTID]   = (uint32_t)hart_id;
 
+    /* MEICONTEXT reset: NOIRQ (bit 15) set, everything else clear.
+     * SDK startup asserts NOIRQ via csrr+bltz and ebreaks otherwise;
+     * reading 0 hung RV32 boot in an ebreak park (RV32_TICK image).
+     * Writes store through the generic array (dynamic IRQ-number
+     * fields are not tracked — no in-tree guest needs them). */
+    cpu->csr[CSR_MEICONTEXT] = 0x8000u;
+
     /* mstatus: machine mode, interrupts disabled */
     cpu->csr[CSR_MSTATUS] = MSTATUS_MPP;  /* MPP = M-mode */
 }
@@ -177,6 +184,26 @@ uint32_t rv_csr_read(rv_cpu_state_t *cpu, uint16_t addr) {
             return 0xFFFFFFFF;
         }
         return 0xFFFFFFFF;
+    }
+    case CSR_MEICONTEXT: {  /* EIC context: NOIRQ/IRQ computed live.
+        * NOIRQ (bit 15) = no enabled-pending external IRQ; IRQ[15:4]
+        * = lowest such number (0x8000 reset == NOIRQ, no IRQ).
+        * RW fields (preempt/save/clear/mret) store through the array.
+        * Dynamic IRQ tracking is what un-hung RV32 SDK boot (it asserts
+        * NOIRQ via csrr+bltz and ebreaks otherwise). */
+        uint32_t irq_field = 0x8000u;
+        if (cpu->bus) {
+            rv_membus_state_t *bus = (rv_membus_state_t *)cpu->bus;
+            uint64_t enabled_pending = bus->clint.ext_pending &
+                ((uint64_t)cpu->csr[CSR_MEIE1] << 32 | cpu->csr[CSR_MEIE0]);
+            for (uint32_t i = 0; i < 52; i++) {
+                if (enabled_pending & (1ULL << i)) {
+                    irq_field = (i & 0xFFFu) << 4;
+                    break;
+                }
+            }
+        }
+        return (cpu->csr[CSR_MEICONTEXT] & ~0xFFF0u) | irq_field;
     }
 
     /* Stack protection */

@@ -46,35 +46,41 @@
 #define ROM_DATA_SOFT_DOUBLE ROM_TABLE_CODE('S', 'D')
 
 /* ROM float/double function stub address ranges.
- * Each stub is 2 bytes (BX LR). The index within the range identifies
- * the operation (fadd=0, fsub=1, fmul=2, ...).
- * cpu_step intercepts execution at these addresses. */
+ * Silicon soft_float/soft_double tables hold 32-bit routine addresses
+ * (the SDK copies them word-wise into sf/sd_table), so each stub slot
+ * is 4 bytes: BX LR at BASE+i*4, index = (pc-BASE)/4. Indices follow
+ * the silicon V1 order (sf_table.h), NOT the old packed order. */
 #define ROM_FLOAT_FUNC_BASE   0x0500
-#define ROM_FLOAT_FUNC_COUNT  20
-#define ROM_DOUBLE_FUNC_BASE  0x0540
-#define ROM_DOUBLE_FUNC_COUNT 20
+#define ROM_FLOAT_FUNC_COUNT  21
+#define ROM_DOUBLE_FUNC_BASE  0x0560
+#define ROM_DOUBLE_FUNC_COUNT 21
 
-/* Float/double function indices (matches RP2040 ROM layout) */
+/* Float/double function indices (silicon V1 order: FADD..FDIV,
+ * FCMP_FAST/_FLAGS, FSQRT, conversions, trig, FSINCOS, FEXP, FLN).
+ * FCMP_FAST/_FLAGS and FSINCOS have BX-LR stubs only (no callers in
+ * the SDK wrappers / rare sincos); everything else is implemented
+ * natively by rom_intercept. */
 #define ROM_FLOAT_FADD        0
 #define ROM_FLOAT_FSUB        1
 #define ROM_FLOAT_FMUL        2
 #define ROM_FLOAT_FDIV        3
-#define ROM_FLOAT_DEPRECATED  4
-#define ROM_FLOAT_FSQRT       5
-#define ROM_FLOAT_FLOAT2INT   6
-#define ROM_FLOAT_FLOAT2FIX   7
-#define ROM_FLOAT_FLOAT2UINT  8
-#define ROM_FLOAT_FLOAT2UFIX  9
-#define ROM_FLOAT_INT2FLOAT   10
-#define ROM_FLOAT_FIX2FLOAT   11
-#define ROM_FLOAT_UINT2FLOAT  12
-#define ROM_FLOAT_UFIX2FLOAT  13
-#define ROM_FLOAT_FCOS        14
-#define ROM_FLOAT_FSIN        15
-#define ROM_FLOAT_FTAN        16
-#define ROM_FLOAT_UNUSED17    17
-#define ROM_FLOAT_FEXP        18
-#define ROM_FLOAT_FLN         19
+#define ROM_FLOAT_FCMP_FAST   4
+#define ROM_FLOAT_FCMP_FAST_FLAGS 5
+#define ROM_FLOAT_FSQRT       6
+#define ROM_FLOAT_FLOAT2INT   7
+#define ROM_FLOAT_FLOAT2FIX   8
+#define ROM_FLOAT_FLOAT2UINT  9
+#define ROM_FLOAT_FLOAT2UFIX  10
+#define ROM_FLOAT_INT2FLOAT   11
+#define ROM_FLOAT_FIX2FLOAT   12
+#define ROM_FLOAT_UINT2FLOAT  13
+#define ROM_FLOAT_UFIX2FLOAT  14
+#define ROM_FLOAT_FCOS        15
+#define ROM_FLOAT_FSIN        16
+#define ROM_FLOAT_FTAN        17
+#define ROM_FLOAT_FSINCOS     18
+#define ROM_FLOAT_FEXP        19
+#define ROM_FLOAT_FLN         20
 
 /* ROM flash function stub addresses */
 #define ROM_FLASH_RANGE_ERASE_ADDR   0x03B8

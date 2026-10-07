@@ -50,7 +50,7 @@
 #define CSR_MEIEA       0xBE2  /* External IRQ array enable access */
 #define CSR_MEIPA       0xFE4  /* External IRQ array pending access */
 #define CSR_MEIFA       0xBE4  /* External IRQ array force */
-#define CSR_MEICONTEXT  0xBE6  /* External IRQ context save/restore */
+#define CSR_MEICONTEXT  0xBE5  /* EIC context (NOIRQ bit 15; reset 0x8000) */
 
 /* Hazard3 stack protection CSRs */
 #define CSR_MSTACK_BASE  0xBC0  /* Stack base (lower bound) */

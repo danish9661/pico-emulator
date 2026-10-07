@@ -151,6 +151,13 @@ int i2c_attach_device(int i2c_num, uint8_t addr,
                       i2c_device_event_fn stop_fn,
                       void *ctx);
 
+/* Drop every attached slave on both buses (SDD re-provisioning).
+ * Hardware RESETS preserve attachments (see i2c_reset_instance);
+ * this is only for sdd_init() re-runs, where the registry (and its
+ * device contexts) is discarded — otherwise stale entries keep
+ * pointing at freed contexts and keep ACKing. */
+void i2c_detach_all_devices(void);
+
 /* Bit-bang (GPIO) slave bridge: does any attached device (either bus)
  * ACK this 7-bit address? Used by the GPIO-level I2C observer so
  * soft-I2C scans (MicroPython machine.I2C.scan) see real slaves. */

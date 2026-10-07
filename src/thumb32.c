@@ -588,21 +588,150 @@ static int t32_misc(uint32_t pc, uint16_t upper, uint16_t lower) {
         (void)is_h;
         return 1;
     }
-    /* SMLAD/SMLSD (dual 16-bit MLA, ARMv7-M DSP): upper = 1111 1011 001M Rn
-     * (M: 1=AD FB21, 0=SD FB41), lower = Ra Rd 0000 Rm.
-     * Verified: smlad FB21 3002, smlsd FB41 3002. */
-    if (((upper & 0xFFF0) == 0xFB20 || (upper & 0xFFF0) == 0xFB40) &&
-        (lower & 0x00F0) == 0x0000) {
-        int m = ((upper >> 5) & 1); /* 1=SMLAD, 0=SMLSD */
+    /* Dual 16-bit MLA, ADD side (SMLAD/X + SMUAD/X, ARMv7-M DSP):
+     * upper = 1111 1011 0010 Rn (FB2x), lower = Ra Rd 000X Rm
+     * (X swaps the Rm halves; Ra==15 means no accumulate = SMUAD/X).
+     * Q on signed overflow. Every shape verified against capstone +
+     * unicorn: smlad FB21 3002, smladx FB21 3012, smuad FB21 F000,
+     * smuadx FB21 F010. (The old code lacked the X forms, which fell
+     * into ldst_single like SMULBB did.) */
+    if ((upper & 0xFFF0) == 0xFB20) {
+        uint32_t op2 = lower & 0x00F0u;
+        if (op2 == 0x0000 || op2 == 0x0010) {
+            int Rn = upper & 0xF;
+            int Ra = (lower >> 12) & 0xF;
+            int Rd = (lower >> 8) & 0xF;
+            int Rm = lower & 0xF;
+            if (Rd == 15) return 0;
+            int X = (lower >> 4) & 1;
+            int32_t a = (int32_t)cpu.r[Rn], b = (int32_t)cpu.r[Rm];
+            int16_t a0 = (int16_t)(a & 0xFFFF), a1 = (int16_t)((a >> 16) & 0xFFFF);
+            int16_t b0 = (int16_t)(b & 0xFFFF), b1 = (int16_t)((b >> 16) & 0xFFFF);
+            int32_t p1 = X ? (int32_t)a0 * b1 : (int32_t)a0 * b0;
+            int32_t p2 = X ? (int32_t)a1 * b0 : (int32_t)a1 * b1;
+            int64_t sum = (Ra == 15 ? 0 : (int64_t)(int32_t)cpu.r[Ra]) +
+                          (int64_t)p1 + p2;
+            if (sum != (int64_t)(int32_t)sum) cpu.xpsr |= (1u << 27);
+            cpu.r[Rd] = (uint32_t)(int32_t)sum;
+            return 1;
+        }
+    }
+    /* Dual 16-bit MLA, SUBTRACT side (SMLSD/X + SMUSD/X): upper =
+     * 1111 1011 0100 Rn (FB4x), lower = Ra Rd 000X Rm (Ra==15 means
+     * no accumulate = SMUSD/X). Verified: smlsd FB41 3002, smlsdx
+     * FB41 3012, smusd FB41 F000 (capstone; the old 010X guess for
+     * SMUSD was wrong and is NOT matched). Q on overflow. */
+    if ((upper & 0xFFF0) == 0xFB40) {
+        uint32_t op2 = lower & 0x00F0u;
+        if (op2 == 0x0000 || op2 == 0x0010) {
+            int Rn = upper & 0xF;
+            int Ra = (lower >> 12) & 0xF;
+            int Rd = (lower >> 8) & 0xF;
+            int Rm = lower & 0xF;
+            if (Rd == 15) return 0;
+            int X = (lower >> 4) & 1;
+            int32_t a = (int32_t)cpu.r[Rn], b = (int32_t)cpu.r[Rm];
+            int16_t a0 = (int16_t)(a & 0xFFFF), a1 = (int16_t)((a >> 16) & 0xFFFF);
+            int16_t b0 = (int16_t)(b & 0xFFFF), b1 = (int16_t)((b >> 16) & 0xFFFF);
+            int32_t p1 = X ? (int32_t)a0 * b1 : (int32_t)a0 * b0;
+            int32_t p2 = X ? (int32_t)a1 * b0 : (int32_t)a1 * b1;
+            int64_t sum = (Ra == 15 ? 0 : (int64_t)(int32_t)cpu.r[Ra]) +
+                          (int64_t)p1 - p2;
+            if (sum != (int64_t)(int32_t)sum) cpu.xpsr |= (1u << 27);
+            cpu.r[Rd] = (uint32_t)(int32_t)sum;
+            return 1;
+        }
+    }
+    /* SMULWB/T + SMLAWB/T (signed 32x16 -> top 32): upper =
+     * 1111 1011 0011 Rn (FB3x), lower = Ra Rd 000M Rm (M: Rm half;
+     * Ra==15 means no accumulate = SMULW). Verified: smulwb FB31
+     * F203, smulwt FB31 F213, smlawb FB31 4203, smlawt FB31 4213.
+     * Q on SMLAW overflow. */
+    if ((upper & 0xFFF0) == 0xFB30) {
+        uint32_t op2 = lower & 0x00F0u;
+        if (op2 == 0x0000 || op2 == 0x0010) {
+            int Rn = upper & 0xF;
+            int Ra = (lower >> 12) & 0xF;
+            int Rd = (lower >> 8) & 0xF;
+            int Rm = lower & 0xF;
+            if (Rd == 15) return 0;
+            int M = (lower >> 4) & 1;
+            int32_t b = (int32_t)cpu.r[Rm];
+            int32_t half = M ? (int32_t)(b >> 16)
+                             : (int32_t)(int16_t)(b & 0xFFFF);
+            int64_t prod = (int64_t)(int32_t)cpu.r[Rn] * half;
+            int32_t w = (int32_t)(prod >> 16);
+            if (Ra == 15) {
+                cpu.r[Rd] = (uint32_t)w;
+            } else {
+                int64_t sum = (int64_t)(int32_t)cpu.r[Ra] + w;
+                if (sum != (int64_t)(int32_t)sum) cpu.xpsr |= (1u << 27);
+                cpu.r[Rd] = (uint32_t)(int32_t)sum;
+            }
+            return 1;
+        }
+    }
+    /* SMMUL/R + SMMLA/R (signed 64-bit top, optional accumulate):
+     * upper = 1111 1011 0101 Rn (FB5x), lower = Ra Rd 000R Rm
+     * (R rounds; Ra==15 means no accumulate = SMMUL). Verified:
+     * smmul FB51 F200, smmulr FB51 F210, smmla FB51 4200,
+     * smmlar FB51 4210. No flags. */
+    if ((upper & 0xFFF0) == 0xFB50) {
+        uint32_t op2 = lower & 0x00F0u;
+        if (op2 == 0x0000 || op2 == 0x0010) {
+            int Rn = upper & 0xF;
+            int Ra = (lower >> 12) & 0xF;
+            int Rd = (lower >> 8) & 0xF;
+            int Rm = lower & 0xF;
+            if (Rd == 15) return 0;
+            int R = (lower >> 4) & 1;
+            int64_t prod = (int64_t)(int32_t)cpu.r[Rn] *
+                           (int64_t)(int32_t)cpu.r[Rm];
+            uint64_t rnd = R ? 0x80000000ULL : 0ULL;
+            uint64_t acc = (Ra == 15) ? 0ULL : ((uint64_t)cpu.r[Ra] << 32);
+            cpu.r[Rd] = (uint32_t)((prod + (int64_t)(acc + rnd)) >> 32);
+            return 1;
+        }
+    }
+    /* SMMLS/R (signed 64-bit top, subtract): upper = 1111 1011 0110
+     * Rn (FB6x), lower = Ra Rd 000R Rm (R rounds; Ra==15 is
+     * UNPREDICTABLE: decline). Verified: smmls FB61 4200, smmlsr
+     * FB61 4210. No flags. */
+    if ((upper & 0xFFF0) == 0xFB60) {
+        uint32_t op2 = lower & 0x00F0u;
+        if (op2 == 0x0000 || op2 == 0x0010) {
+            int Rn = upper & 0xF;
+            int Ra = (lower >> 12) & 0xF;
+            int Rd = (lower >> 8) & 0xF;
+            int Rm = lower & 0xF;
+            if (Rd == 15 || Ra == 15) return 0;
+            int R = (lower >> 4) & 1;
+            int64_t prod = (int64_t)(int32_t)cpu.r[Rn] *
+                           (int64_t)(int32_t)cpu.r[Rm];
+            uint64_t rnd = R ? 0x80000000ULL : 0ULL;
+            uint64_t acc = (uint64_t)cpu.r[Ra] << 32;
+            cpu.r[Rd] = (uint32_t)(((int64_t)(acc - (uint64_t)prod) +
+                                    (int64_t)rnd) >> 32);
+            return 1;
+        }
+    }
+    /* USAD8 + USADA8 (sum of absolute byte differences): upper =
+     * 1111 1011 0111 Rn (FB7x), lower = Ra Rd 0000 Rm (Ra==15 means
+     * no accumulate = USAD8; there is no X form). Verified: usad8
+     * FB71 F000, usada8 FB71 4606. No flags. */
+    if ((upper & 0xFFF0) == 0xFB70 && (lower & 0x00F0) == 0x0000) {
         int Rn = upper & 0xF;
         int Ra = (lower >> 12) & 0xF;
         int Rd = (lower >> 8) & 0xF;
         int Rm = lower & 0xF;
-        int32_t a = (int32_t)cpu.r[Rn], b = (int32_t)cpu.r[Rm];
-        int32_t p1 = (int16_t)(a & 0xFFFF) * (int16_t)(b & 0xFFFF);
-        int32_t p2 = (int16_t)((a >> 16) & 0xFFFF) * (int16_t)((b >> 16) & 0xFFFF);
-        uint32_t acc = (Ra == 15) ? 0 : cpu.r[Ra];
-        if (Rd != 15) cpu.r[Rd] = acc + (uint32_t)(m ? (p1 + p2) : (p1 - p2));
+        if (Rd == 15) return 0;
+        uint32_t a = cpu.r[Rn], b = cpu.r[Rm];
+        uint32_t s = 0;
+        for (int l = 0; l < 4; l++) {
+            int av = (a >> (l * 8)) & 0xFF, bv = (b >> (l * 8)) & 0xFF;
+            s += (uint32_t)(av >= bv ? av - bv : bv - av);
+        }
+        cpu.r[Rd] = (Ra == 15) ? s : cpu.r[Ra] + s;
         return 1;
     }
     /* SMULBB/BT/TB/TT (signed 16x16 -> 32, ARMv7-M DSP): upper =
@@ -2542,13 +2671,15 @@ int thumb32_step(uint32_t pc, uint16_t upper, uint16_t lower) {
         if (t32_vsel(pc, upper, lower)) return 1;
         /* Check misc 32-bit first (SDIV, UDIV, MUL, CLZ etc.) */
         if (t32_misc(pc, upper, lower)) return 1;
-        /* DSP/multiply space (FAxx/FBxx) with no decode is UNPREDICTABLE,
-         * and no 32-bit load/store form uses these uppers (loads are
-         * F8/F9): refuse the ldst_single misdecode below, which can
-         * alias Rt=15 into a wild PC load (SMULBB-as-LDRB sent M33
-         * display() to 0x10, then via stale LR into the I2C loop for a
-         * delayed 0x3E380000 HardFault). Loud fault instead. */
-        if ((upper & 0xFE00) == 0xFA00) return 0;
+        /* DSP/multiply/vector/coprocessor space (FAxx through FFxx)
+         * with no decode is UNPREDICTABLE, and no 32-bit load/store
+         * form uses these uppers (loads are F8/F9; DCP MRC2/MRRC2
+         * claim their FC50/FE10 shapes first): refuse the ldst_single
+         * misdecode below, which can alias Rt=15 into a wild PC load
+         * (SMULBB-as-LDRB sent M33 display() to 0x10, then via stale
+         * LR into the I2C loop for a delayed 0x3E380000 HardFault).
+         * Loud fault instead. (upper[10:9] != 0 excludes F8/F9.) */
+        if (((upper >> 9) & 3u) != 0) return 0;
         /* Load/Store single */
         t32_ldst_single(pc, upper, lower);
         return 1;
